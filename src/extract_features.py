@@ -22,10 +22,16 @@ def main():
     # 2. Loop through all files
     for root, dirs, files in os.walk(dataset_path):
         for file in files:
-            if file.endswith(".bmp"):
+            # skip raw
+            if "raw" in root:
+                continue
+
+            # process only specific .bmp files
+            if file.endswith(".bmp") and "HT" not in file and "R414" not in file:
                 image_path = os.path.join(root, file)
                 print(f"Processing: {image_path}")
-
+                # print(f"{root}, {dirs}")
+                # break
                 try:
                     # Load and Extract
                     nimage = NImage(image_path)
@@ -43,20 +49,14 @@ def main():
 
                     # 2. Open that file and write "x, y, angle" for each minutia
                     with open(txt_path, "w") as f:
-                            np_image = nimage.to_numpy(NPixelFormat.rgb_8u)
-                            for idx, minutiae in enumerate(minutiae_list):
-                                x1 = minutiae.x
-                                y1 = minutiae.y
-                                angle = minutiae.angle
-                                x2 = int(x1 + 15 * np.cos(angle * 1.411764706 * rad))
-                                y2 = int(y1 + 15 * np.sin(angle * 1.411764706 * rad))
-                                cv2.line(np_image, (x1, y1), (x2, y2), (0, 0, 255), 1)
-                                cv2.circle(np_image, (x1, y1), 3, (0, 0, 255), thickness=-1, lineType=8, shift=0)
-                                (f"{idx} minutiae cordinate ({minutiae.x}, {minutiae.y}) angle {minutiae.angle}")
+                            for minutiae in enumerate(minutiae_list):
+                                # x y angle
+                                f.write(f"{minutiae.x} {minutiae.y} {minutiae.angle}\n")
 
-                    
+                    print(f"  - Extracted {len(minutiae_list)} minutiae to {txt_path}")
                 except Exception as e:
                     print(f"  - Error processing {file}: {e}")
+
 
 if __name__ == "__main__":
     main()
