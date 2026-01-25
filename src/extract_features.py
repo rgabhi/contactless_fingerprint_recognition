@@ -44,8 +44,9 @@ def main():
 
 
                     
-                    if status != "succeeded" or len(finger_templates) == 0:
-                        print(f"  - Extraction failed for {file}")
+                    # if status != "succeeded" or len(finger_templates) == 0:
+                    if len(finger_templates) == 0:
+                        print(f"  - Extraction failed for {file}. Reason: {status}")
                         continue
 
                     # Get the list of minutiae
@@ -56,11 +57,11 @@ def main():
 
                     # 2. Open that file and write "x, y, angle" for each minutia
                     with open(txt_path, "w") as f:
-                            for minutiae in enumerate(minutiae_list):
+                            for minutiae in minutiae_list:
                                 # x y angle
                                 f.write(f"{minutiae.x} {minutiae.y} {minutiae.angle}\n")
 
-                    print(f"  - Extracted {len(minutiae_list)} minutiae to {txt_path}")
+                    print(f"  - Success! Saved {len(minutiae_list)} minutiae to {txt_path}")
                 except Exception as e:
                     print(f"  - Error processing {file}: {e}")
 
