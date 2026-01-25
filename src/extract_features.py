@@ -27,7 +27,7 @@ def main():
                 continue
 
             # process only specific .bmp files
-            if file.endswith(".bmp") and "HT" not in file and "R414" not in file:
+            if file.endswith(".bmp") and "HT" not in file and "R414" not in file and not file.startswith("._"):
                 image_path = os.path.join(root, file)
                 print(f"Processing: {image_path}")
                 # print(f"{root}, {dirs}")
@@ -35,7 +35,14 @@ def main():
                 try:
                     # Load and Extract
                     nimage = NImage(image_path)
+                    
+                    # force resolution to 500 DPI
+                    nimage.horz_resolution = 500
+                    nimage.vert_resolution = 500
+
                     status, finger_templates = engine.extract_finger(nimage)
+
+
                     
                     if status != "succeeded" or len(finger_templates) == 0:
                         print(f"  - Extraction failed for {file}")
