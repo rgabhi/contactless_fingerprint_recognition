@@ -153,97 +153,127 @@ def compute_minutia_similarity(desc1, desc2, mu=16):
     return similarity_sum / K
 
 
+import numpy as np
+import math
+import cv2
+
+# Keep your existing helper functions: 
+# get_ridge_count, compute_ridge_count_matrix, compute_orientation_map, 
+# get_angle_difference, compute_minutia_descriptor, compute_minutia_similarity
+
 def compute_diagonal_similarity(minutiae_T, minutiae_Q, orientation_T, orientation_Q):
     """
-    Computes the normalized matrix of minutia-wise similarities.
-    Returns a matrix of size Nt x Nq.
+    Computes Minutia-Wise Similarity with Normalization (Eq. 3 and 4).
     """
     Nt = len(minutiae_T)
     Nq = len(minutiae_Q)
     
-    similarity_matrix = np.zeros((Nt, Nq))
+    # 1. Raw Similarity (Eq. 2)
+    raw_sim_matrix = np.zeros((Nt, Nq))
     
-    # 1. Pre-compute descriptors for Template
-    descriptors_T = []
-    for m in minutiae_T:
-        descriptors_T.append(compute_minutia_descriptor(m, orientation_T))
-        
-    # 2. Calculate Raw Similarities
-    for j in range(Nq):
-        desc_Q = compute_minutia_descriptor(minutiae_Q[j], orientation_Q)
-        
-        for i in range(Nt):
-            sim = compute_minutia_similarity(descriptors_T[i], desc_Q)
-            similarity_matrix[i, j] = sim
-            
-    # 3. Normalize (Subtract Mean)
-    # We only want to average the actual calculated scores
-    avg_score = np.mean(similarity_matrix)
-    similarity_matrix = similarity_matrix - avg_score
-            
-    return similarity_matrix
+    # Pre-compute descriptors
+    descriptors_T = [compute_minutia_descriptor(m, orientation_T) for m in minutiae_T]
+    descriptors_Q = [compute_minutia_descriptor(m, orientation_Q) for m in minutiae_Q]
+    
+    for i in range(Nt):
+        for j in range(Nq):
+            raw_sim_matrix[i, j] = compute_minutia_similarity(descriptors_T[i], descriptors_Q[j])
 
+    # 2. Subtract Mean (Eq. 3) [cite: 62]
+    avg_score = np.mean(raw_sim_matrix)
+    gamma_prime = raw_sim_matrix - avg_score
+    
+    # 3. Min-Max Normalization to [-1, 1] (Eq. 4) 
+    # The PDF states gamma'_max = 1, gamma'_min = -1
+    # We normalize the observed values to this range.
+    min_val = np.min(gamma_prime)
+    max_val = np.max(gamma_prime)
+    
+    if max_val - min_val == 0:
+        return np.zeros((Nt, Nq)) # Avoid divide by zero
+        
+    # Scale to [-1, 1]
+    S_aa = 2 * ((gamma_prime - min_val) / (max_val - min_val)) - 1
+            
+    return S_aa
+
+def sign_func(x, delta):
+    """Eq. 15: Returns 1 if x < delta, else -1"""
+    return 1 if x < delta else -1
 
 def compute_global_consistency_matrix(minutiae_T, minutiae_Q, 
                                       rc_matrix_T, rc_matrix_Q, 
                                       diagonal_sim_matrix,
-                                      mu_rc=8.0):
+                                      delta_rc=2, delta_theta=np.pi/6, delta_d=10):
     """
-    Builds the full Compatibility Matrix W based on Ridge Counts.
-    Size: (Nt*Nq) x (Nt*Nq)
+    Builds the Compatibility Matrix W using Eq. 6.
     """
     Nt = len(minutiae_T)
     Nq = len(minutiae_Q)
     num_candidates = Nt * Nq
     
-    # 1. Initialize the massive matrix
+    # Initialize Sparse or Dense Matrix (Dense for simplicity as per assignment)
     W = np.zeros((num_candidates, num_candidates))
     
-    # Helper to convert 2D indices (i, j) to 1D index (k)
-    # k = i * Nq + j
-    
-    print(f"Building Global Matrix: {num_candidates}x{num_candidates} ...")
-    
-    # 2. Loop through every pair of candidates
-    # Candidate 'a' represents mapping (i -> i_prime)
+    print(f"Building Global Matrix W ({num_candidates}x{num_candidates})...")
+
     for i in range(Nt):
         for i_prime in range(Nq):
-            a = i * Nq + i_prime
+            a = i * Nq + i_prime # Flattened index for candidate pair (i, i')
             
-            # --- Fill Diagonal (Minutia Similarity) ---
-            # Using the pre-computed diagonal matrix we made earlier
+            # --- 1. Diagonal Terms (Minutia-Wise Similarity) [cite: 49] ---
             W[a, a] = diagonal_sim_matrix[i, i_prime]
             
-            # Compare candidate 'a' with candidate 'b'
-            # Candidate 'b' represents mapping (j -> j_prime)
             for j in range(Nt):
                 for j_prime in range(Nq):
-                    b = j * Nq + j_prime
+                    b = j * Nq + j_prime # Flattened index for candidate pair (j, j')
                     
-                    # Skip if it's the same candidate (already filled diagonal)
-                    if a == b:
-                        continue
-                        
-                    # --- Check for Conflicts (The Constraints) ---
-                    # One-to-one constraint: 
-                    # We can't use the same template point 'i' for two different matches
-                    # We can't use the same query point 'i_prime' for two different matches
-                    if i == j or i_prime == j_prime:
+                    if a == b: continue
+                    
+                    # --- 2. Conflict Constraint [cite: 69, 86] ---
+                    # If i==j but i'!=j' (one template mapped to two query points)
+                    # OR i!=j but i'==j' (two template points mapped to one query point)
+                    if (i == j and i_prime != j_prime) or (i != j and i_prime == j_prime):
                         W[a, b] = 0
                         continue
-                        
-                    # --- Calculate Compatibility S(a, b) ---
-                    # Get the Ridge Counts from our pre-calculated matrices
+                    
+                    # --- 3. Pairwise Similarity Calculation [cite: 71-75] ---
+                    
+                    # A. Ridge Count Difference
                     rc_T = rc_matrix_T[i, j]
                     rc_Q = rc_matrix_Q[i_prime, j_prime]
+                    diff_rc = abs(rc_T - rc_Q)
                     
-                    # Calculate difference
-                    diff = abs(rc_T - rc_Q)
+                    # B. Orientation Difference
+                    # psi_ij = phi(theta_i, theta_j)
+                    psi_T = get_angle_difference(minutiae_T[i].angle, minutiae_T[j].angle)
+                    psi_Q = get_angle_difference(minutiae_Q[i_prime].angle, minutiae_Q[j_prime].angle)
+                    diff_theta = get_angle_difference(psi_T, psi_Q)
                     
-                    # Apply Exponential Formula
-                    compatibility = np.exp(-diff / mu_rc)
+                    # C. Euclidean Distance Difference
+                    dist_T = math.hypot(minutiae_T[i].x - minutiae_T[j].x, minutiae_T[i].y - minutiae_T[j].y)
+                    dist_Q = math.hypot(minutiae_Q[i_prime].x - minutiae_Q[j_prime].x, minutiae_Q[i_prime].y - minutiae_Q[j_prime].y)
+                    diff_d = abs(dist_T - dist_Q)
                     
-                    W[a, b] = compatibility
+                    # D. Scoring Logic (Eq. 6)
+                    # Product of sign functions
+                    score = (sign_func(diff_rc, delta_rc) * sign_func(diff_theta, delta_theta) * sign_func(diff_d, delta_d))
+                             
+                    W[a, b] = score
 
     return W
 
+
+
+def calculate_final_score(refined_T1, refined_Q1, energy_val, Nt, Nq):
+    """
+    Computes final score using Eq. 8:
+    Score = (2 * f(x_final)) / (N_match * (Nt + Nq))
+    """
+    N_match = len(refined_T1)
+    
+    if N_match == 0 or (Nt + Nq) == 0:
+        return 0.0
+        
+    score = (2 * energy_val) / (N_match * (Nt + Nq))
+    return score
