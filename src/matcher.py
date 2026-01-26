@@ -155,7 +155,7 @@ def compute_minutia_similarity(desc1, desc2, mu=16):
 
 def compute_diagonal_similarity(minutiae_T, minutiae_Q, orientation_T, orientation_Q):
     """
-    Computes the matrix of minutia-wise similarities (Eq. 2).
+    Computes the normalized matrix of minutia-wise similarities.
     Returns a matrix of size Nt x Nq.
     """
     Nt = len(minutiae_T)
@@ -163,18 +163,87 @@ def compute_diagonal_similarity(minutiae_T, minutiae_Q, orientation_T, orientati
     
     similarity_matrix = np.zeros((Nt, Nq))
     
-    # Pre-compute descriptors for Template to save time
+    # 1. Pre-compute descriptors for Template
     descriptors_T = []
     for m in minutiae_T:
         descriptors_T.append(compute_minutia_descriptor(m, orientation_T))
         
-    # Loop through Query minutiae
+    # 2. Calculate Raw Similarities
     for j in range(Nq):
         desc_Q = compute_minutia_descriptor(minutiae_Q[j], orientation_Q)
         
-        # Compare against every Template minutia
         for i in range(Nt):
             sim = compute_minutia_similarity(descriptors_T[i], desc_Q)
             similarity_matrix[i, j] = sim
             
+    # 3. Normalize (Subtract Mean)
+    # We only want to average the actual calculated scores
+    avg_score = np.mean(similarity_matrix)
+    similarity_matrix = similarity_matrix - avg_score
+            
     return similarity_matrix
+
+
+def compute_global_consistency_matrix(minutiae_T, minutiae_Q, 
+                                      rc_matrix_T, rc_matrix_Q, 
+                                      diagonal_sim_matrix,
+                                      mu_rc=8.0):
+    """
+    Builds the full Compatibility Matrix W based on Ridge Counts.
+    Size: (Nt*Nq) x (Nt*Nq)
+    """
+    Nt = len(minutiae_T)
+    Nq = len(minutiae_Q)
+    num_candidates = Nt * Nq
+    
+    # 1. Initialize the massive matrix
+    W = np.zeros((num_candidates, num_candidates))
+    
+    # Helper to convert 2D indices (i, j) to 1D index (k)
+    # k = i * Nq + j
+    
+    print(f"Building Global Matrix: {num_candidates}x{num_candidates} ...")
+    
+    # 2. Loop through every pair of candidates
+    # Candidate 'a' represents mapping (i -> i_prime)
+    for i in range(Nt):
+        for i_prime in range(Nq):
+            a = i * Nq + i_prime
+            
+            # --- Fill Diagonal (Minutia Similarity) ---
+            # Using the pre-computed diagonal matrix we made earlier
+            W[a, a] = diagonal_sim_matrix[i, i_prime]
+            
+            # Compare candidate 'a' with candidate 'b'
+            # Candidate 'b' represents mapping (j -> j_prime)
+            for j in range(Nt):
+                for j_prime in range(Nq):
+                    b = j * Nq + j_prime
+                    
+                    # Skip if it's the same candidate (already filled diagonal)
+                    if a == b:
+                        continue
+                        
+                    # --- Check for Conflicts (The Constraints) ---
+                    # One-to-one constraint: 
+                    # We can't use the same template point 'i' for two different matches
+                    # We can't use the same query point 'i_prime' for two different matches
+                    if i == j or i_prime == j_prime:
+                        W[a, b] = 0
+                        continue
+                        
+                    # --- Calculate Compatibility S(a, b) ---
+                    # Get the Ridge Counts from our pre-calculated matrices
+                    rc_T = rc_matrix_T[i, j]
+                    rc_Q = rc_matrix_Q[i_prime, j_prime]
+                    
+                    # Calculate difference
+                    diff = abs(rc_T - rc_Q)
+                    
+                    # Apply Exponential Formula
+                    compatibility = np.exp(-diff / mu_rc)
+                    
+                    W[a, b] = compatibility
+
+    return W
+
