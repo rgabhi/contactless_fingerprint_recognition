@@ -108,47 +108,101 @@ def main(args):
                                         (q_minutiae[j]['x'], q_minutiae[j]['y']))
             RC_Q[i, j] = RC_Q[j, i] = rc
 
-    # Fill W
-    for i in range(Nt):
-        for i_prime in range(Nq):
-            row_idx = i * Nq + i_prime
+    # ... (Previous code for RC_T, RC_Q calculations remains the same) ...
 
-            # 1. Diagonal element
-            W[row_idx, row_idx] = S_aa_matrix[i, i_prime]
+    # 4. Construct Full Matrix W (Vectorized)
+    print("Constructing W using Vectorization...")
+    
+    # Create the mapping from global index k to (i, i_prime)
+    # Row indices (u): Template i, Query i_prime
+    # Col indices (v): Template j, Query j_prime
+    
+    # Expand RC matrices to (Nt*Nq, Nt*Nq)
+    # RC_T_big[u, v] should depend on i, j. Repeat repeats elements, Tile repeats whole matrix.
+    # RC_T (Nt x Nt) -> Repeat rows Nq times, Repeat cols Nq times
+    RC_T_big = np.repeat(np.repeat(RC_T, Nq, axis=0), Nq, axis=1)
+    
+    # RC_Q_big[u, v] should depend on i_prime, j_prime.
+    # RC_Q (Nq x Nq) -> Tile the whole matrix Nt x Nt times
+    RC_Q_big = np.tile(RC_Q, (Nt, Nt))
+    
+    # 1. Ridge Count Difference
+    Diff_RC = np.abs(RC_T_big - RC_Q_big)
+    
+    # 2. Orientation Difference
+    # Extract Thetas
+    thetas_t = np.array([m['theta'] for m in t_minutiae])
+    thetas_q = np.array([m['theta'] for m in q_minutiae])
+    
+    # Compute Pairwise diffs within T and Q
+    # psi_T[i, j] = diff(theta_i, theta_j)
+    # Using broadcasting: |A - A.T| with wrap-around
+    def pairwise_angle_diff(thetas):
+        diff = np.abs(thetas[:, None] - thetas)
+        return np.minimum(diff, np.pi - diff)
 
-            # 2. Off-Diagonal Elements
-            for j in range(Nt):
-                for j_prime in range(Nq):
-                    col_idx = j * Nq + j_prime
+    Psi_T = pairwise_angle_diff(thetas_t) # Nt x Nt
+    Psi_Q = pairwise_angle_diff(thetas_q) # Nq x Nq
+    
+    # Expand like RC
+    Psi_T_big = np.repeat(np.repeat(Psi_T, Nq, axis=0), Nq, axis=1)
+    Psi_Q_big = np.tile(Psi_Q, (Nt, Nt))
+    
+    # Theta Difference between edges
+    Diff_Theta = np.abs(Psi_T_big - Psi_Q_big)
+    Diff_Theta = np.minimum(Diff_Theta, np.pi - Diff_Theta) # Handle angle wrap
+    
+    # 3. Distance Difference
+    # Compute pairwise Euclidean dists for T and Q
+    coords_t = np.array([[m['x'], m['y']] for m in t_minutiae])
+    coords_q = np.array([[m['x'], m['y']] for m in q_minutiae])
+    
+    # Dist matrix: sqrt((x-x')^2 + (y-y')^2)
+    # Scipy would be easier, but using pure numpy:
+    Dist_T = np.sqrt(np.sum((coords_t[:, None] - coords_t)**2, axis=-1))
+    Dist_Q = np.sqrt(np.sum((coords_q[:, None] - coords_q)**2, axis=-1))
+    
+    Dist_T_big = np.repeat(np.repeat(Dist_T, Nq, axis=0), Nq, axis=1)
+    Dist_Q_big = np.tile(Dist_Q, (Nt, Nt))
+    
+    Diff_Dist = np.abs(Dist_T_big - Dist_Q_big)
 
-                    if row_idx == col_idx: continue 
-
-                    # Conflict constraint
-                    if (i == j and i_prime != j_prime) or (i != j and i_prime == j_prime):
-                        W[row_idx, col_idx] = 0.0
-                        continue
-                
-                    # Calculate Edge Similarity
-                    rc_t = RC_T[i, j]
-                    rc_q = RC_Q[i_prime, j_prime]
-                    diff_rc = abs(rc_t - rc_q)
-
-                    psi_t = angle_diff(t_minutiae[i]['theta'], t_minutiae[j]['theta'])
-                    psi_q = angle_diff(q_minutiae[i_prime]['theta'], q_minutiae[j_prime]['theta'])
-                    diff_theta = abs(psi_t - psi_q)
-
-                    dist_t = math.hypot(t_minutiae[i]['x'] - t_minutiae[j]['x'], 
-                                        t_minutiae[i]['y'] - t_minutiae[j]['y'])
-                    dist_q = math.hypot(q_minutiae[i_prime]['x'] - q_minutiae[j_prime]['x'], 
-                                        q_minutiae[i_prime]['y'] - q_minutiae[j_prime]['y'])
-                    diff_dist = abs(dist_t - dist_q)
-
-                    term1 = psi_function(diff_rc, DELTA_RC)
-                    term2 = psi_function(diff_theta, DELTA_THETA)
-                    term3 = psi_function(diff_dist, DELTA_DIST)
-
-                    S_ab = term1 * term2 * term3
-                    W[row_idx, col_idx] = S_ab
+    # --- CALCULATE SCORES ---
+    # Apply Thresholds (Eq 6) - Terms are 1 if < delta, -1 otherwise
+    Term1 = np.where(Diff_RC < DELTA_RC, 1.0, -1.0)
+    Term2 = np.where(Diff_Theta < DELTA_THETA, 1.0, -1.0)
+    Term3 = np.where(Diff_Dist < DELTA_DIST, 1.0, -1.0)
+    
+    W = Term1 * Term2 * Term3
+    
+    # --- APPLY CONSTRAINTS ---
+    # Diagonal S_aa
+    # S_aa_matrix is Nt x Nq. Flatten it to diagonal.
+    S_aa_flat = S_aa_matrix.flatten() # Order is i=0(j=0..Nq), i=1...
+    np.fill_diagonal(W, S_aa_flat)
+    
+    # Conflict Constraint:
+    # W[u, v] = 0 if (i == j and i' != j') OR (i != j and i' == j')
+    # Create index grids
+    I_idx = np.repeat(np.arange(Nt), Nq) # [0,0,0, 1,1,1...]
+    I_prime_idx = np.tile(np.arange(Nq), Nt) # [0,1,2, 0,1,2...]
+    
+    # Grid of u (rows) and v (cols)
+    # We need masks for u vs v
+    # i_grid[u, v] is the template index 'i' for row u
+    i_mat = np.tile(I_idx[:, None], (1, Nt*Nq))
+    j_mat = np.tile(I_idx[None, :], (Nt*Nq, 1))
+    
+    ip_mat = np.tile(I_prime_idx[:, None], (1, Nt*Nq))
+    jp_mat = np.tile(I_prime_idx[None, :], (Nt*Nq, 1))
+    
+    # Conflict Mask
+    # Condition 1: Same Template, Different Query
+    conflict_1 = (i_mat == j_mat) & (ip_mat != jp_mat)
+    # Condition 2: Different Template, Same Query
+    conflict_2 = (i_mat != j_mat) & (ip_mat == jp_mat)
+    
+    W[conflict_1 | conflict_2] = 0.0
     
     # 5. Save Matrix
     output_file = args.output

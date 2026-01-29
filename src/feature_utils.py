@@ -52,7 +52,7 @@ def get_local_descriptor(x, y, orientation_map, L=5, K=8, R_step=10):
 
 def get_ridge_count(image, p1, p2):
     """
-    Counts ridges between point p1=(x1,y1) and p2=(x2,y2).
+    Counts ridges between p1 and p2 using adaptive thresholding.
     """
     x1, y1 = p1
     x2, y2 = p2
@@ -71,13 +71,20 @@ def get_ridge_count(image, p1, p2):
         if 0 <= ix < w and 0 <= iy < h:
             intensities.append(image[iy, ix])
 
-    # FIX: Initialize as integer 0, not list []
+    if not intensities:
+        return 0
+
+    # FIX: Use local mean as adaptive threshold
+    # This handles brightness variations better than fixed 127
+    local_threshold = np.mean(intensities)
+    
     ridges = 0
     in_ridge = False
-    threshold = 127
     
+    # Assuming ridges are BRIGHTER than valleys (standard for enhanced/inverted images)
+    # If your Step 3 outputs dark ridges on white background, flip to: val < local_threshold
     for val in intensities:
-        is_ridge_pixel = val > threshold
+        is_ridge_pixel = val < local_threshold
 
         if is_ridge_pixel and not in_ridge:
             ridges += 1

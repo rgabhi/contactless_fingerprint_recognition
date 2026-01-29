@@ -33,7 +33,7 @@ def run_matching_pipeline(t_json, t_img, q_json, q_img, temp_dir="temp_match"):
 
         # 2. Build Matrix
         subprocess.check_output([
-            "python3", "src2/step5_build_matrix.py",
+            "python3", "src/step5_build_matrix.py",
             "--template_json", t_json, "--template_img", t_img,
             "--query_json", q_json, "--query_img", q_img,
             "--output", os.path.splitext(matrix_path)[0]
@@ -41,14 +41,14 @@ def run_matching_pipeline(t_json, t_img, q_json, q_img, temp_dir="temp_match"):
 
         # 3. LGA
         subprocess.check_output([
-            "python3", "src2/step6_lga.py",
+            "python3", "src/step6_lga.py",
             "--matrix_path", matrix_path, "--Nt", str(Nt), "--Nq", str(Nq),
             "--output", os.path.splitext(lga_path)[0]
         ], stderr=subprocess.DEVNULL)
         
         # 4. Refinement
         subprocess.check_output([
-            "python3", "src2/step7_refinement.py",
+            "python3", "src/step7_refinement.py",
             "--lga_solution", lga_path, "--matrix_path", matrix_path,
             "--template_json", t_json, "--template_img", t_img,
             "--query_json", q_json, "--query_img", q_img,
