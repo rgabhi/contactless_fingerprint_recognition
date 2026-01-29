@@ -4,7 +4,7 @@ import random
 import sys
 
 class LooseGeneticAlgorithm:
-    def __init__(self, W, Nt, Nq, pop_size=100, generations=100, mutation_rate=0.1):
+    def __init__(self, W, Nt, Nq, pop_size=100, generations=200, mutation_rate=0.1):
         self.W = W
         self.Nt = Nt
         self.Nq = Nq
@@ -279,8 +279,8 @@ if __name__ == "__main__":
     parser.add_argument('--Nt', type=int, required=True, help='Number of Minutiae in Template')
     parser.add_argument('--Nq', type=int, required=True, help='Number of Minutiae in Query')
     parser.add_argument('--output', required=True, help='Output file for solution vector')
-    parser.add_argument('--pop_size', type=int, default=50, help='Population size')
-    parser.add_argument('--generations', type=int, default=100, help='Generations')
+    parser.add_argument('--pop_size', type=int, default=100, help='Population size')
+    parser.add_argument('--generations', type=int, default=200, help='Generations')
     
     args = parser.parse_args()
     main(args)
