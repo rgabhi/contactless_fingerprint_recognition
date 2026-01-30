@@ -4,6 +4,7 @@ import sys
 import re
 import cv2
 import time
+import logging
 
 # Add src to path to allow importing modules
 sys.path.append(os.path.join(os.path.dirname(__file__)))
@@ -14,6 +15,16 @@ import step2_roi_extraction as s2
 import step3_enhancement as s3
 import step4_minutia_extraction as s4
 
+def setup_logging(log_file="batch_process.log"):
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s [%(levelname)s] %(message)s',
+        handlers=[
+            logging.FileHandler(log_file),
+            logging.StreamHandler(sys.stdout)
+        ]
+    )
+
 def parse_jpg_filename(filename):
     # Matches: 1_10_2_0.jpg
     match = re.match(r"(\d+)_(\d+)_(\d+)_(\d+)", filename)
@@ -21,21 +32,22 @@ def parse_jpg_filename(filename):
     return None
 
 def main(args):
+    setup_logging(args.log_file)
     input_root = os.path.abspath(args.input_dir)
     processed_dir = os.path.join(input_root, "processed_jpgs")
     os.makedirs(processed_dir, exist_ok=True)
     
     # 1. INITIALIZE SDK (ONCE)
-    print("="*40)
-    print("INITIALIZING BIO-ENGINE...")
+    logging.info("="*40)
+    logging.info("INITIALIZING BIO-ENGINE...")
     try:
         # We use Step 2's init function to get the engine
         engine = s2.init_sdk()
-        print("SDK Initialized. Starting Batch Processing...")
+        logging.info("SDK Initialized. Starting Batch Processing...")
     except Exception as e:
-        print(f"Critical SDK Error: {e}")
+        logging.critical(f"Critical SDK Error: {e}")
         sys.exit(1)
-    print("="*40)
+    logging.info("="*40)
 
     # 2. Collect Tasks
     tasks = []
@@ -53,7 +65,7 @@ def main(args):
     # Sort by Subject ID
     tasks.sort(key=lambda x: int(x[1].split('_')[0]))
     total = len(tasks)
-    print(f"Found {total} images to process.")
+    logging.info(f"Found {total} images to process.")
     
     success_count = 0
     start_time = time.time()
@@ -66,11 +78,11 @@ def main(args):
             path_enh = os.path.join(processed_dir, f"{base_name}_enhanced.jpg")
             path_json = os.path.join(processed_dir, f"{base_name}_minutiae.json")
             
-            # Skip if output exists
-            if os.path.exists(path_json) and os.path.exists(path_enh):
+            # Use --force to overwrite if needed, otherwise skip
+            if not args.force and os.path.exists(path_json) and os.path.exists(path_enh):
+                if i % 50 == 0: # Reduce spam for skipped files
+                    logging.info(f"[{i+1}/{total}] {base_name}: Skipping (Already Exists)")
                 continue
-
-            print(f"[{i+1}/{total}] {base_name}...", end=" ", flush=True)
 
             try:
                 # Step 1: Standardize
@@ -78,36 +90,41 @@ def main(args):
                 
                 # Step 2: ROI (Pass Engine)
                 if not s2.process_roi(engine, path_std, path_roi):
-                    print("[Fail Step 2]")
+                    logging.warning(f"[{i+1}/{total}] {base_name}: Failed Step 2 (ROI)")
                     continue
                     
                 # Step 3: Enhance
                 if not os.path.exists(path_roi):
-                    print("[Fail Step 3: No Input]")
+                    logging.warning(f"[{i+1}/{total}] {base_name}: Failed Step 3 (No Input)")
                     continue
                 s3.enhance_fingerprint(path_roi, path_enh)
                 
                 # Step 4: Minutiae (Pass Engine)
                 if not s4.process_minutiae(engine, path_enh, path_json):
-                     print("[Fail Step 4]")
+                     logging.warning(f"[{i+1}/{total}] {base_name}: Failed Step 4 (Minutiae)")
                      continue
                 
-                print("Done.")
                 success_count += 1
+                # Log success periodically to keep shell clean
+                if i % 10 == 0 or i == total - 1:
+                    logging.info(f"[{i+1}/{total}] {base_name}: Success")
                 
             except Exception as e:
-                print(f"[Error: {e}]")
+                logging.error(f"[{i+1}/{total}] {base_name}: Error {e}")
                 continue
 
     finally:
         # 4. CLEANUP (Crucial to prevent 'invalid_operation' crash)
-        print("\nReleasing SDK Engine...")
+        logging.info("Releasing SDK Engine...")
         del engine
-        print(f"Batch Complete. Success: {success_count}/{total}")
-        print(f"Time Taken: {(time.time() - start_time)/60:.2f} minutes")
+        elapsed_min = (time.time() - start_time) / 60
+        logging.info(f"Batch Complete. Success: {success_count}/{total}")
+        logging.info(f"Time Taken: {elapsed_min:.2f} minutes")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--input_dir', required=True, help="Path to data root (containing 'raw' folders)")
+    parser.add_argument('--log_file', default='batch_process.log', help="Log file path")
+    parser.add_argument('--force', action='store_true', help="Force overwrite of existing files")
     args = parser.parse_args()
     main(args)
