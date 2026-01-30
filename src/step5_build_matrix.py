@@ -7,12 +7,12 @@ import sys
 from feature_utils import compute_orientation_map, get_local_descriptor, get_ridge_count
 
 # CONSTANTS
-MU = 16.0
+MU = 8.0              # Was 16.0. Lower value = more forgiving of local rotation
+DELTA_RC = 5          # Was 3. Relaxed for noisy ridge extraction
+DELTA_THETA = np.deg2rad(45) # Was 30 deg. Relaxed for perspective distortion
+DELTA_DIST = 40       # Was 30. Relaxed for scale variance
 L_CIRCLES = 5
 K_POINTS = 8
-DELTA_RC = 3 
-DELTA_THETA = np.deg2rad(30) 
-DELTA_DIST = 30 
 
 def angle_diff(a1, a2):
     diff = abs(a1 - a2)
@@ -127,15 +127,22 @@ def main(args):
     
     Diff_Dist = np.abs(Dist_T_big - Dist_Q_big)
 
-    Term1 = np.where(Diff_RC < DELTA_RC, 1.0, -1.0)
-    Term2 = np.where(Diff_Theta < DELTA_THETA, 1.0, -1.0)
-    Term3 = np.where(Diff_Dist < DELTA_DIST, 1.0, -1.0)
+
+    # 1. Logic Fix: Use Logical AND, not Multiplication
+    # A pair is compatible ONLY if RC, Theta, AND Distance are all within limits.
+    is_compatible = (Diff_RC < DELTA_RC) & \
+                    (Diff_Theta < DELTA_THETA) & \
+                    (Diff_Dist < DELTA_DIST)
     
-    W = (Term1 * Term2 * Term3).astype(np.float32)
+    # 2. Assign Weights: 1.0 for compatible, -1.0 for incompatible
+    W = np.where(is_compatible, 1.0, -1.0).astype(np.float32)
     
+    # 3. Inject Diagonal Scores (Node Similarity)
     S_aa_flat = S_aa_matrix.flatten()
     np.fill_diagonal(W, S_aa_flat)
     
+    # 4. Hard Constraints (Conflict Elimination)
+    # Ensure one-to-one mapping constraint
     I_idx = np.repeat(np.arange(Nt), Nq)
     I_prime_idx = np.tile(np.arange(Nq), Nt)
     
@@ -147,7 +154,7 @@ def main(args):
     conflict_1 = (i_mat == j_mat) & (ip_mat != jp_mat)
     conflict_2 = (i_mat != j_mat) & (ip_mat == jp_mat)
     
-    W[conflict_1 | conflict_2] = 0.0
+    W[conflict_1 | conflict_2] = -5.0 # Stronger penalty for conflicts
     
     np.save(args.output, W)
 

@@ -51,15 +51,12 @@ def get_local_descriptor(x, y, orientation_map, L=5, K=8, R_step=10):
     return np.array(descriptor)
 
 def get_ridge_count(image, p1, p2):
-    """
-    Counts ridges between p1 and p2 using adaptive thresholding.
-    """
     x1, y1 = p1
     x2, y2 = p2
 
-    num_points = int(math.hypot(x2 - x1, y2 - y1))
-    if num_points == 0:
-        return 0
+    # Increase sampling density (1.5x distance) to catch thin ridges
+    num_points = int(math.hypot(x2 - x1, y2 - y1) * 1.5)
+    if num_points == 0: return 0
     
     x_values = np.linspace(x1, x2, num_points)
     y_values = np.linspace(y1, y2, num_points)
@@ -71,20 +68,26 @@ def get_ridge_count(image, p1, p2):
         if 0 <= ix < w and 0 <= iy < h:
             intensities.append(image[iy, ix])
 
-    if not intensities:
-        return 0
+    if not intensities: return 0
 
-    # FIX: Use local mean as adaptive threshold
-    # This handles brightness variations better than fixed 127
-    local_threshold = np.mean(intensities)
+    # Smooth the intensity profile to remove pixel noise
+    profile = np.array(intensities)
+    # Simple moving average of size 3
+    if len(profile) > 3:
+        profile = np.convolve(profile, np.ones(3)/3, mode='valid')
+
+    # Adaptive Thresholding on the profile
+    local_threshold = np.mean(profile)
     
     ridges = 0
     in_ridge = False
     
-    # Assuming ridges are BRIGHTER than valleys (standard for enhanced/inverted images)
-    # If your Step 3 outputs dark ridges on white background, flip to: val < local_threshold
-    for val in intensities:
-        is_ridge_pixel = val < local_threshold
+    # Count crossings
+    for val in profile:
+        # Check if currently on a ridge (assuming dark ridges on light background? 
+        # CHECK: If your ridges are white (255), use val > local_threshold)
+        # Based on Step 3 CLAHE, ridges are likely dark (low intensity).
+        is_ridge_pixel = val < local_threshold 
 
         if is_ridge_pixel and not in_ridge:
             ridges += 1

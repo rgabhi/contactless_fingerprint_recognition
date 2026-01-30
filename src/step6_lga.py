@@ -92,54 +92,88 @@ class LooseGeneticAlgorithm:
 
     def mutate(self, p):
         p_new = p.copy()
-        op = random.choice(['remove', 'add', 'swap'])
         
-        active_indices = [i for i in range(self.Nt) if p_new[i] != 0]
-        empty_indices = [i for i in range(self.Nt) if p_new[i] == 0]
+        # Apply 1 to 3 mutations randomly to shake things up more
+        num_mutations = random.randint(1, 3) 
         
-        used_q = set(p_new[i] for i in active_indices)
-        available_q = list(set(range(1, self.Nq + 1)) - used_q)
-        
-        if op == 'remove' and active_indices:
-            idx = random.choice(active_indices)
-            p_new[idx] = 0
+        for _ in range(num_mutations):
+            op = random.choice(['remove', 'add', 'swap'])
             
-        elif op == 'add' and empty_indices and available_q:
-            idx = random.choice(empty_indices)
-            val = random.choice(available_q)
-            p_new[idx] = val
+            active_indices = [i for i in range(self.Nt) if p_new[i] != 0]
+            empty_indices = [i for i in range(self.Nt) if p_new[i] == 0]
             
-        elif op == 'swap' and len(active_indices) >= 2:
-            idx1, idx2 = random.sample(active_indices, 2)
-            p_new[idx1], p_new[idx2] = p_new[idx2], p_new[idx1]
-            
+            if op == 'remove' and active_indices:
+                idx = random.choice(active_indices)
+                p_new[idx] = 0
+                
+            elif op == 'add' and empty_indices: # Note: Simplified checks
+                used_q = set(p_new[i] for i in active_indices)
+                available_q = list(set(range(1, self.Nq + 1)) - used_q)
+                if available_q:
+                    idx = random.choice(empty_indices)
+                    val = random.choice(available_q)
+                    p_new[idx] = val
+                
+            elif op == 'swap' and len(active_indices) >= 2:
+                idx1, idx2 = random.sample(active_indices, 2)
+                p_new[idx1], p_new[idx2] = p_new[idx2], p_new[idx1]
+                
         return p_new
 
     def run(self):
+        # 1. Initialize Population
         population = [self.generate_random_individual() for _ in range(self.pop_size - 1)]
-        population.append(self.generate_greedy_individual())
+        population.append(self.generate_greedy_individual()) # Keep the greedy seed!
         
         best_fitness = -float('inf')
         best_individual = population[0].copy()
         
+        # Stagnation tracking variables
+        stagnation_counter = 0
+        current_mutation_rate = self.mutation_rate
+        
         for gen in range(self.generations):
+            # Evaluate Fitness
             fitness_scores = [(ind, self.get_fitness(ind)) for ind in population]
             fitness_scores.sort(key=lambda x: x[1], reverse=True)
             
+            # Check for improvement
             current_best_ind, current_best_score = fitness_scores[0]
+            
             if current_best_score > best_fitness:
                 best_fitness = current_best_score
                 best_individual = current_best_ind.copy()
-            
+                stagnation_counter = 0  # Reset on improvement
+                current_mutation_rate = self.mutation_rate # Reset rate
+            else:
+                stagnation_counter += 1
+
+            # --- ADAPTIVE TUNING LOGIC ---
+            # If stuck for 15 generations, triple the mutation rate
+            if stagnation_counter > 15:
+                current_mutation_rate = min(0.4, self.mutation_rate * 3)
+            # If stuck for 40 generations, introduce "Cataclysm" (Extreme mutation)
+            if stagnation_counter > 40:
+                current_mutation_rate = 0.6 
+            # -----------------------------
+
+            # Selection (Elitism: Keep top 2 parents)
             num_parents = self.pop_size // 2
             parents = [ind for ind, score in fitness_scores[:num_parents]]
             next_gen = [parents[0].copy(), parents[1].copy()]
             
+            # Reproduction
             while len(next_gen) < self.pop_size:
+                # Random selection from top 50%
                 p1, p2 = random.sample(parents, 2)
                 c1, c2 = self.crossover(p1, p2)
-                if random.random() < self.mutation_rate: c1 = self.mutate(c1)
-                if random.random() < self.mutation_rate: c2 = self.mutate(c2)
+                
+                # Apply mutation with the DYNAMIC rate
+                if random.random() < current_mutation_rate: 
+                    c1 = self.mutate(c1)
+                if random.random() < current_mutation_rate: 
+                    c2 = self.mutate(c2)
+                    
                 next_gen.extend([c1, c2])
                 
             population = next_gen[:self.pop_size]
@@ -176,8 +210,14 @@ if __name__ == "__main__":
     parser.add_argument('--Nt', type=int, required=True)
     parser.add_argument('--Nq', type=int, required=True)
     parser.add_argument('--output', required=True)
-    parser.add_argument('--pop_size', type=int, default=100)
-    parser.add_argument('--generations', type=int, default=100) # Reduced default for speed
+    
+    # --- TUNING EDITS ---
+    # Increased Population: 100 -> 200 (Better diversity)
+    parser.add_argument('--pop_size', type=int, default=200) 
+    
+    # Increased Generations: 100 -> 400 (Allow time for adaptive logic to work)
+    parser.add_argument('--generations', type=int, default=400) 
+    # --------------------
     
     args = parser.parse_args()
     main(args)

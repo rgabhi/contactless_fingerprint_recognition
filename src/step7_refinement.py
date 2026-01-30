@@ -7,8 +7,8 @@ import sys
 from feature_utils import get_ridge_count
 
 # CONSTANTS (Same as Step 5)
-DELTA_RC = 3
-DELTA_THETA = np.deg2rad(30) # 30 degrees
+DELTA_RC = 5          # Was 3. Relaxed for noisy ridge extraction
+DELTA_THETA = np.deg2rad(45) # Was 30 deg. Relaxed for perspective distortion
 
 # --- Helper Class for JSON Saving ---
 class NumpyEncoder(json.JSONEncoder):
