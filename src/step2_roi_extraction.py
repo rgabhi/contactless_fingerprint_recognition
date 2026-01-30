@@ -1,20 +1,19 @@
-import argparse
 import sys
 import os
 import cv2
 import numpy as np
-
-# Import NSDK modules
 from pynsdk.media import NImage
 from pynsdk.biometrics import NBiometricEngine, NBiometricOperations, NFinger, NSubject, NBiometricStatus, NFPosition
 from pynsdk.licensing import NLicense, NLicenseManager
 
-def main(args):
+def init_sdk():
+    """Initializes the SDK and returns the Engine object."""
     # 1. Initialize License
     is_trial_mode = True
     NLicenseManager.set_trial_mode(is_trial_mode)
     
-    license_name = "FingerClient" # Changed from FingerExtractor to FingerClient for Segmentation
+    print("Initializing VeriFinger SDK License...")
+    license_name = "FingerClient"
     if not NLicense.obtain("/local", 5000, license_name):
         print(f"Failed to obtain license: {license_name}")
         # Fallback to FingerExtractor if Client not available (often bundle)
@@ -24,30 +23,29 @@ def main(args):
     # 2. Setup the Biometric Engine
     engine = NBiometricEngine()
     # We do NOT set fingers_return_binarized_image = True because we want grayscale for Step 3
+    engine.fingers_return_binarized_image = False
+    return engine
 
-    # 3. Load and Pre-process Image (CRITICAL FOR DARK IMAGES)
-    if not os.path.exists(args.input):
-        print(f"Error: Input file {args.input} not found.")
-        sys.exit(1)
-
-    print(f"Loading image: {args.input}")
+def process_roi(engine, input_path, output_path):
+    """Processes a single image using the existing engine instance."""
     
-    # --- PRE-PROCESSING START ---
-    # The SDK fails on dark images ('bad_object'). We manually boost contrast first.
-    cv_img = cv2.imread(args.input, cv2.IMREAD_GRAYSCALE)
+    # --- Check Input ---
+    if not os.path.exists(input_path):
+        print(f"Error: Input file does not exist: {input_path}")
+        return False
+
+    # --- PRE-PROCESSING (CLAHE) ---
+    cv_img = cv2.imread(input_path, cv2.IMREAD_GRAYSCALE)
     if cv_img is None:
-        print("Error: OpenCV failed to load image.")
-        sys.exit(1)
-        
-    # Apply CLAHE (Contrast Limited Adaptive Histogram Equalization)
-    # This reveals the finger in the dark background
+        print(f"Error: OpenCV could not read image: {input_path}")
+        return False
+
     clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
     enhanced_cv_img = clahe.apply(cv_img)
     
-    # Save to temp file for SDK
-    temp_path = args.input + ".tmp.png"
+    # Save temp for SDK
+    temp_path = input_path + ".tmp_roi.png"
     cv2.imwrite(temp_path, enhanced_cv_img)
-    # --- PRE-PROCESSING END ---
 
     try:
         # Load the pre-processed image into NImage
@@ -61,50 +59,49 @@ def main(args):
         subject = NSubject()
         finger = NFinger()
         finger.image = nimage
-        finger.position = NFPosition.nfpUnknown # Let SDK decide, or use nfpRightThumb if known
+        finger.position = NFPosition.nfpUnknown # Let SDK decide
         subject.fingers.add(finger)
 
         # 5. Perform Segmentation
         # This isolates the finger but keeps the grayscale data
-        print("Performing Segmentation...")
         status = engine.perform_operation(subject, NBiometricOperations.segment)
 
         if status == NBiometricStatus.ok:
-            # According to SDK docs/sample:
-            # subject.fingers[0] is the original
-            # subject.fingers[1...N] are the segmented fingers
-            
+            # subject.fingers[0] is original, subject.fingers[1] is segmented
             cnt = subject.fingers.count
-            print(f"Segmentation successful. Found {cnt - 1} fingers.")
             
             if cnt > 1:
-                # Save the first segmented finger found
-                # We save to args.output (e.g., ..._roi.jpg)
-                # The image inside NFinger is usually PNG/BMP buffer, we save to file
-                subject.fingers[1].image.save_to_file(args.output)
-                print(f"Saved ROI to: {args.output}")
+                subject.fingers[1].image.save_to_file(output_path)
+                print(f"Segmentation successful. Saved to {output_path}")
             else:
                 print("Warning: Operation OK but no segments returned. Saving Original.")
-                # Fallback: Save the enhanced original if segmentation "passed" but returned nothing
-                cv2.imwrite(args.output, enhanced_cv_img)
+                cv2.imwrite(output_path, enhanced_cv_img)
         else:
-            print(f"Segmentation failed with status: '{status}'")
-            # If 'bad_object' or 'too_few_features', we should output the cropped/enhanced 
-            # original so the pipeline doesn't break, or exit.
-            # Given the difficulty of data, let's save the enhanced image as fallback
-            # so Step 3 has *something* to work with.
-            print("Fallback: Saving pre-enhanced image as ROI.")
-            cv2.imwrite(args.output, enhanced_cv_img)
-            # Do not exit(1) here to allow batch process to continue
+            print(f"Segmentation failed with status: '{status}'. Saving pre-enhanced fallback.")
+            cv2.imwrite(output_path, enhanced_cv_img)
             
+        return True
+
+    except Exception as e:
+        print(f"Step 2 Error: {e}")
+        return False
+        
     finally:
         # Cleanup temp file
         if os.path.exists(temp_path):
             os.remove(temp_path)
 
 if __name__ == "__main__":
+    import argparse
     parser = argparse.ArgumentParser(description='Step 2: ROI Extraction (Segmentation)')
     parser.add_argument('--input', required=True, help='Input standardized image')
     parser.add_argument('--output', required=True, help='Output ROI image')
     args_ = parser.parse_args()
-    main(args_)
+    
+    eng = init_sdk()
+    try:
+        process_roi(eng, args_.input, args_.output)
+    finally:
+        # CRITICAL FIX: Explicitly delete the engine before script exit
+        # This prevents the 'invalid_operation' error during garbage collection
+        del eng
