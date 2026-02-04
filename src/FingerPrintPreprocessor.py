@@ -7,6 +7,8 @@ from pynsdk.biometrics import NBiometricEngine, NBiometricOperations, NFinger, N
 import cv2
 import numpy as np
 import json
+from scipy.spatial import Delaunay
+import matplotlib.pyplot as plt
 
 
 class FingerprintPreprocessor:
@@ -110,18 +112,24 @@ class FingerprintPreprocessor:
                                 # Apply ROI
                                 roi = self.get_roi_mask(enhanced_img)
                                 skeleton_img = cv2.bitwise_and(skeleton_img, roi)
+                                cv2.imwrite(skeleton_full_path, skeleton_img)
 
 
-                                # Step 4: Extract Minutiae
-                                minutiae_data = self.extract_minutiae(skeleton_full_path, skeleton_filename)
+                                # --- CORRECTION ---
+                                # Feed the ENHANCED GRAYSCALE image to the SDK, not the skeleton.
+                                raw_minutiae = self.extract_minutiae(enhanced_full_path, enhanced_filename)
 
-
-                                # Post-filter minutiae
-                                minutiae_data = self.remove_border_minutiae(minutiae_data, skeleton_img.shape)
-                                minutiae_data = self.prune_close_minutiae(minutiae_data, min_dist=12)
-                                minutiae_data = self.remove_isolated(minutiae_data)
-                                self.all_features[filename] = minutiae_data
-                                print(f"Minutiae extracted.")
+                                # --- POST-PROCESSING ---
+                                # Apply your cleaning filters to the SDK's output
+                                # Note: You'll need to pass the image shape for border removal
+                                h, w = enhanced_img.shape
+                                
+                                clean_data = self.remove_border_minutiae(raw_minutiae, (h, w))
+                                clean_data = self.prune_close_minutiae(clean_data, min_dist=12)
+                                clean_data = self.remove_isolated(clean_data)
+                                
+                                self.all_features[filename] = clean_data
+                                print(f"Minutiae extracted: {len(raw_minutiae)} -> {len(clean_data)} (cleaned)")
         
                     count += 1
             print(" -- writing minutiae -- ")
@@ -431,8 +439,475 @@ class FingerprintPreprocessor:
             return []
     
     
+    def normalize_angle(self, angle):
+        """Wrap angle to [-pi, pi]."""
+        return (angle + np.pi) % (2 * np.pi) - np.pi
 
 
+    def build_graph(self, minutiae_list):
+        """
+        Build a Delaunay graph and store invariant edge features.
+
+        Each edge stores:
+            (distance, relative_angle_at_i, relative_angle_at_j)
+
+        Returns:
+            points: Nx2 array of (x, y)
+            edges: list of (i, j)
+            edge_features: dict {(i, j): (d, alpha_i, alpha_j)}
+        """
+
+        # 1. Extract minutiae coordinates
+        points = np.array(
+            [[m['x'], m['y']] for m in minutiae_list],
+            dtype=np.float32
+        )
+
+        if len(points) < 3:
+            return points, [], {}
+
+        # 2. Delaunay triangulation
+        tri = Delaunay(points)
+
+        # 3. Extract unique edges
+        edges = set()
+        for simplex in tri.simplices:
+            i, j, k = simplex
+            edges.add(tuple(sorted((i, j))))
+            edges.add(tuple(sorted((j, k))))
+            edges.add(tuple(sorted((k, i))))
+
+        edges = list(edges)
+
+        # 4. Compute invariant edge features
+        edge_features = {}
+
+        for i, j in edges:
+            xi, yi = points[i]
+            xj, yj = points[j]
+
+            dx = xj - xi
+            dy = yj - yi
+
+            # Edge length (translation + rotation invariant)
+            distance = np.sqrt(dx * dx + dy * dy)
+
+            if distance > 80:   # pixels, tune 60–100
+                continue
+
+
+            # Edge direction
+            phi = np.arctan2(dy, dx)
+
+            # Minutiae orientations
+            theta_i = minutiae_list[i]['angle']
+            theta_j = minutiae_list[j]['angle']
+
+            # Relative angles (rotation invariant)
+            alpha_i = self.normalize_angle(theta_i - phi)
+            alpha_j = self.normalize_angle(theta_j - (phi + np.pi))
+
+            edge_features[(i, j)] = (distance, alpha_i, alpha_j, phi)
+
+        return points, edges, edge_features
+
+
+    def match_graphs(self,probe_edge_features,gallery_edge_features,dist_tol=6,angle_tol=0.25,rot_tol=0.15):
+        """
+        Graph matching with rotation consensus.
+        """
+
+        probe_edges = list(probe_edge_features.values())
+        gallery_edges = list(gallery_edge_features.values())
+
+        rotation_diffs = []
+        used_gallery = set()
+
+        # -----------------------------
+        # Step 1: Collect candidates
+        # -----------------------------
+        for p_idx, (dp, a1p, a2p, phi_p) in enumerate(probe_edges):
+            for g_idx, (dg, a1g, a2g, phi_g) in enumerate(gallery_edges):
+
+                if g_idx in used_gallery:
+                    continue
+
+                # Distance check
+                if abs(dp - dg) > dist_tol:
+                    continue
+
+                # Angle checks (order invariant)
+                direct_match = (
+                    abs(a1p - a1g) < angle_tol and
+                    abs(a2p - a2g) < angle_tol
+                )
+
+                swapped_match = (
+                    abs(a1p - a2g) < angle_tol and
+                    abs(a2p - a1g) < angle_tol
+                )
+
+                if direct_match:
+                    diff = self.normalize_angle(phi_p - phi_g)
+                    rotation_diffs.append(diff)
+                    used_gallery.add(g_idx)
+                    break
+
+                elif swapped_match:
+                    diff = self.normalize_angle(phi_p - (phi_g + np.pi))
+                    rotation_diffs.append(diff)
+                    used_gallery.add(g_idx)
+                    break
+
+        # -----------------------------
+        # Step 2: Consensus voting
+        # -----------------------------
+        final_score = 0
+
+        for r in rotation_diffs:
+            count = sum(
+                abs(self.normalize_angle(r - other)) < rot_tol
+                for other in rotation_diffs
+            )
+            final_score = max(final_score, count)
+
+        return final_score
+
+
+
+    def get_match_label(self, filename_a, filename_b):
+        """
+        Returns 'Genuine' if files are from the same finger of the same subject,
+        else 'Imposter'.
+        """
+
+        # 1. Remove extension
+        name_a = os.path.splitext(filename_a)[0]
+        name_b = os.path.splitext(filename_b)[0]
+
+        # 2. Split components
+        # Expected: SIRE-SubjectID_FingerID_CaptureID
+        parts_a = name_a.split('_')
+        parts_b = name_b.split('_')
+
+        # Safety check
+        if len(parts_a) < 3 or len(parts_b) < 3:
+            return "Imposter"
+
+        # 3. Extract Subject ID and Finger ID
+        # parts_a[0] = "SIRE-1"
+        subject_a = parts_a[0]      # includes "SIRE-"
+        finger_a = parts_a[1]
+
+        subject_b = parts_b[0]
+        finger_b = parts_b[1]
+
+        # 4. Decide label
+        if subject_a == subject_b and finger_a == finger_b:
+            return "Genuine"
+        else:
+            return "Imposter"
+
+    def run_experiment(self, tolerance=6):
+        """
+        Run an all-vs-all fingerprint matching experiment.
+        Returns genuine and imposter score lists.
+        """
+
+        # -------------------------------
+        # Part 1: Precompute graphs
+        # -------------------------------
+        graph_database = {}
+
+        for filename, minutiae_list in self.all_features.items():
+            _, _, edge_lengths = self.build_graph(minutiae_list)
+            graph_database[filename] = edge_lengths
+
+        # -------------------------------
+        # Part 2: All-vs-All Matching
+        # -------------------------------
+        genuine_scores = []
+        imposter_scores = []
+
+        filenames = list(graph_database.keys())
+        N = len(filenames)
+
+        for i in range(N):
+            for j in range(i + 1, N):
+
+                file_a = filenames[i]
+                file_b = filenames[j]
+
+                # Retrieve precomputed graphs
+                edges_a = graph_database[file_a]
+                edges_b = graph_database[file_b]
+
+                # Compute match score
+                raw_matches = score = self.match_graphs(edges_a,edges_b,dist_tol=6,angle_tol=0.17, rot_tol=0.1)
+                score = raw_matches / min(len(edges_a), len(edges_b))
+
+                # Determine label
+                label = self.get_match_label(file_a, file_b)
+
+                # Store score
+                if label == "Genuine":
+                    genuine_scores.append(score)
+                else:
+                    imposter_scores.append(score)
+
+        return genuine_scores, imposter_scores
+
+
+    def calculate_error_rates(self, threshold, genuine_scores, imposter_scores):
+        """
+        Calculate FAR and FRR for a given threshold.
+
+        Args:
+            threshold: decision threshold
+            genuine_scores: list of genuine match scores
+            imposter_scores: list of imposter match scores
+
+        Returns:
+            FAR (%), FRR (%)
+        """
+
+        # Safety checks
+        if len(genuine_scores) == 0 or len(imposter_scores) == 0:
+            return 0.0, 0.0
+
+        # False Acceptances (Impostors incorrectly accepted)
+        false_accepts = sum(score >= threshold for score in imposter_scores)
+        FAR = (false_accepts / len(imposter_scores)) * 100
+
+        # False Rejections (Genuine users incorrectly rejected)
+        false_rejects = sum(score < threshold for score in genuine_scores)
+        FRR = (false_rejects / len(genuine_scores)) * 100
+
+        return FAR, FRR
+
+
+    def find_eer(self, genuine_scores, imposter_scores):
+        best_threshold = None
+        min_diff = float('inf')
+        eer = None
+
+        # Sweep thresholds in [0, 1]
+        for threshold in np.linspace(0, 1, 200):
+
+            FAR, FRR = self.calculate_error_rates(
+                threshold,
+                genuine_scores,
+                imposter_scores
+            )
+
+            diff = abs(FAR - FRR)
+
+            if diff < min_diff:
+                min_diff = diff
+                best_threshold = threshold
+                eer = (FAR + FRR) / 2.0
+
+        return eer, best_threshold
+
+    def visualize_match(self, filename_a, filename_b):
+        """
+        Visualizes the consensus matches between two fingerprints.
+        """
+        # 1. Load images
+        img_a = cv2.imread(os.path.join(self.output_path, filename_a.replace(".bmp", "_enhanced.png")))
+        img_b = cv2.imread(os.path.join(self.output_path, filename_b.replace(".bmp", "_enhanced.png")))
+        
+        # 2. Get Features
+        edges_a = self.build_graph(self.all_features[filename_a])[2]
+        edges_b = self.build_graph(self.all_features[filename_b])[2]
+        
+        # 3. Find Consensus Matches (Re-run logic to get specific edges)
+        # We need to adapt the matching logic slightly to return the PAIRS
+        # (This uses your hard-coded tolerances)
+        dist_tol = 6
+        angle_tol = 0.25
+        rot_tol = 0.15
+        
+        probe_edges = list(edges_a.values())
+        gallery_edges = list(edges_b.values())
+        
+        # Store (probe_idx, gallery_idx, rotation_diff)
+        candidates = []
+        
+        # --- Copy-Paste of your Match Logic (Step 1) ---
+        for p_idx, (dp, a1p, a2p, phi_p) in enumerate(probe_edges):
+            for g_idx, (dg, a1g, a2g, phi_g) in enumerate(gallery_edges):
+                
+                if abs(dp - dg) > dist_tol: continue
+
+                direct_match = (abs(a1p - a1g) < angle_tol and abs(a2p - a2g) < angle_tol)
+                swapped_match = (abs(a1p - a2g) < angle_tol and abs(a2p - a1g) < angle_tol)
+                
+                if direct_match:
+                    diff = self.normalize_angle(phi_p - phi_g)
+                    candidates.append((p_idx, g_idx, diff))
+                elif swapped_match:
+                    diff = self.normalize_angle(phi_p - (phi_g + np.pi))
+                    candidates.append((p_idx, g_idx, diff))
+
+        # --- Consensus Logic (Step 2) ---
+        best_count = 0
+        best_rotation = 0
+        
+        # Find the best rotation cluster
+        for _, _, r in candidates:
+            count = sum(abs(self.normalize_angle(r - other[2])) < rot_tol for other in candidates)
+            if count > best_count:
+                best_count = count
+                best_rotation = r
+                
+        # Filter: Keep only edges that agree with best_rotation
+        final_matches = []
+        for p_idx, g_idx, r in candidates:
+            if abs(self.normalize_angle(r - best_rotation)) < rot_tol:
+                # We need the original edge indices (i, j) to get coordinates
+                edge_keys_a = list(edges_a.keys())
+                edge_keys_b = list(edges_b.keys())
+                final_matches.append((edge_keys_a[p_idx], edge_keys_b[g_idx]))
+
+        print(f"Visualizing {len(final_matches)} consensus matches (Rotation: {np.degrees(best_rotation):.1f}°)")
+
+        # 4. Draw!
+        # Stack images side-by-side
+        h1, w1 = img_a.shape[:2]
+        h2, w2 = img_b.shape[:2]
+        vis = np.zeros((max(h1, h2), w1 + w2, 3), dtype=np.uint8)
+        vis[:h1, :w1] = img_a
+        vis[:h2, w1:w1+w2] = img_b
+        
+        points_a = self.build_graph(self.all_features[filename_a])[0]
+        points_b = self.build_graph(self.all_features[filename_b])[0]
+
+        for (ia, ja), (ib, jb) in final_matches:
+            # Get coordinates for the edge midpoints or endpoints
+            # Let's just draw the first point of the edge to keep it simple
+            pt_a = tuple(points_a[ia].astype(int))
+            pt_b = tuple(points_b[ib].astype(int))
+            
+            # Shift point B by width of image A
+            pt_b_shifted = (pt_b[0] + w1, pt_b[1])
+            
+            # Draw line
+            cv2.line(vis, pt_a, pt_b_shifted, (0, 255, 0), 1)
+            cv2.circle(vis, pt_a, 4, (0, 0, 255), -1)
+            cv2.circle(vis, pt_b_shifted, 4, (0, 0, 255), -1)
+
+        cv2.imwrite(os.path.join(self.output_path, "match_vis.png"), vis)
+        print("Saved match_vis.png")
+
+    def get_roc_data(self, genuine_scores, imposter_scores, num_points=100):
+        """
+        Generates (FAR, TAR) pairs for plotting the ROC curve.
+        """
+        # Generate thresholds from 0.0 to 1.0
+        thresholds = np.linspace(0, 1, num_points)
+        
+        far_list = []
+        tar_list = []
+
+        for t in thresholds:
+            # Use your existing helper to get errors
+            far, frr = self.calculate_error_rates(t, genuine_scores, imposter_scores)
+            
+            # TAR is the opposite of FRR (Accepted = 100% - Rejected)
+            tar = 100 - frr
+            
+            far_list.append(far)
+            tar_list.append(tar)
+
+        return far_list, tar_list
+
+    def tune_parameters(self, log_filename="tuning_results.csv"):
+        """
+        Runs a Grid Search to find the best (dist, rot, angle) combination.
+        Logs results to a CSV file.
+        """
+        print(f"\n--- Starting 3-Parameter Tuning (Grid Search) ---")
+        
+        # 1. Precompute Graphs
+        print("Precomputing all graphs...")
+        graph_database = {}
+        for filename, minutiae_list in self.all_features.items():
+            _, _, edge_features = self.build_graph(minutiae_list)
+            graph_database[filename] = edge_features
+
+        filenames = list(graph_database.keys())
+        N = len(filenames)
+        
+        # 2. Define Parameter Ranges
+        dist_range = [4, 6, 8]
+        rot_range = [0.10, 0.15, 0.20, 0.25]
+        # We include 0.17 specifically to see if we can beat your record!
+        angle_range = [0.10, 0.15, 0.17, 0.20, 0.25] 
+
+        best_eer = 100.0
+        best_params = (None, None, None)
+
+        # 3. Open Log File
+        with open(os.path.join(self.output_path, log_filename), "w") as f:
+            # Update Header
+            f.write("Dist_Tol,Rot_Tol,Angle_Tol,EER,Threshold\n")
+            
+            total_runs = len(dist_range) * len(rot_range) * len(angle_range)
+            run_count = 0
+            
+            for d_tol in dist_range:
+                for r_tol in rot_range:
+                    for a_tol in angle_range:  # <--- New Loop!
+                        run_count += 1
+                        
+                        genuine_scores = []
+                        imposter_scores = []
+
+                        # Run Matching Loop
+                        for i in range(N):
+                            for j in range(i + 1, N):
+                                file_a = filenames[i]
+                                file_b = filenames[j]
+                                
+                                edges_a = graph_database[file_a]
+                                edges_b = graph_database[file_b]
+
+                                # Call match_graphs with ALL parameters dynamic
+                                raw_score = self.match_graphs(
+                                    edges_a, edges_b, 
+                                    dist_tol=d_tol, 
+                                    angle_tol=a_tol,  # <--- Now using the loop variable
+                                    rot_tol=r_tol
+                                )
+                                
+                                denom = min(len(edges_a), len(edges_b))
+                                score = raw_score / denom if denom > 0 else 0
+
+                                label = self.get_match_label(file_a, file_b)
+                                if label == "Genuine":
+                                    genuine_scores.append(score)
+                                else:
+                                    imposter_scores.append(score)
+
+                        # Calculate EER
+                        eer, thresh = self.find_eer(genuine_scores, imposter_scores)
+                        
+                        # Log to file
+                        f.write(f"{d_tol},{r_tol},{a_tol},{eer:.4f},{thresh:.4f}\n")
+                        f.flush()
+                        
+                        # Only print if we found a new best (to keep output clean)
+                        if eer < best_eer:
+                            print(f"[{run_count}/{total_runs}] New Best! Dist={d_tol}, Rot={r_tol:.2f}, Angle={a_tol:.2f} -> EER: {eer:.2f}%")
+                            best_eer = eer
+                            best_params = (d_tol, r_tol, a_tol)
+
+        print(f"\n🏆 Final Best EER: {best_eer:.2f}%")
+        print(f"   Parameters: dist={best_params[0]}, rot={best_params[1]}, angle={best_params[2]}")
+        print(f"   Log saved to: {os.path.join(self.output_path, log_filename)}")
+        
+        return best_params
 
 # --- Execution Block ---
 # Update these paths to match your actual structure
@@ -441,5 +916,63 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # print(BASE_DIR)
 dataset_dir = os.path.join(BASE_DIR, "data", "DS1_sample")
 processed_dir = os.path.join(BASE_DIR, "data", "processed_images")
+
+
 preprocessor = FingerprintPreprocessor(dataset_dir, processed_dir)
-preprocessor.process_dataset()
+
+# 1. Process images to extract minutiae (Step 1-4)
+preprocessor.process_dataset() 
+
+# 2. Run the Matching Experiment (Step 5-7)
+print("\n--- Running All-vs-All Matching Experiment ---")
+gen_scores, imp_scores = preprocessor.run_experiment()
+
+# 3. Analyze Results
+avg_gen = sum(gen_scores) / len(gen_scores) if gen_scores else 0
+avg_imp = sum(imp_scores) / len(imp_scores) if imp_scores else 0
+
+print(f"Genuine Pairs: {len(gen_scores)} | Average Score: {avg_gen:.2f}")
+print(f"Imposter Pairs: {len(imp_scores)} | Average Score: {avg_imp:.2f}")
+
+# Optional: Save scores to file for plotting later
+results = {"genuine": gen_scores, "imposter": imp_scores}
+with open(os.path.join(processed_dir, "scores.json"), 'w') as f:
+    json.dump(results, f)
+
+
+eer, best_threshold = preprocessor.find_eer(gen_scores, imp_scores)
+print(f"EER : {eer}\nThreshold: {best_threshold}")
+
+preprocessor.visualize_match("SIRE-3_1_1.bmp", "SIRE-3_1_2.bmp")
+
+print("\n--- Generating ROC Curve ---")
+
+# 1. Get the data points
+far_points, tar_points = preprocessor.get_roc_data(gen_scores, imp_scores)
+
+# 2. Plot the Curve
+plt.figure(figsize=(6, 6))
+plt.plot(far_points, tar_points, label=f"ROC (EER={eer:.2f}%)", color='blue', linewidth=2)
+
+# 3. Add the 'Random Guess' line (diagonal)
+plt.plot([0, 100], [0, 100], linestyle='--', color='gray', label="Random Guess")
+
+# 4. Labels and Saving
+plt.xlabel("False Acceptance Rate (FAR) %")
+plt.ylabel("True Acceptance Rate (TAR) %")
+plt.title("Receiver Operating Characteristic (ROC)")
+plt.legend(loc="lower right")
+plt.grid(True)
+plt.xlim([0, 100])
+plt.ylim([0, 100])
+
+save_path = os.path.join(processed_dir, "roc_curve.png")
+plt.savefig(save_path)
+print(f"ROC Curve saved to: {save_path}")
+
+# Run the Grid Search
+best_dist, best_rot, best_ang = preprocessor.tune_parameters("tuning_log.csv")
+
+# Optional: You can now run the final ROC/Visualization using these best params!
+# print(f"Running final validation with optimized parameters...")
+# ...
