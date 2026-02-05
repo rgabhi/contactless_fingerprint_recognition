@@ -6,60 +6,54 @@ from src.preprocessor import FingerprintPreprocessor
 import src.matcher_utils as utils
 import json
 
-# --- Configuration ---
+# ------ config -- -- 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATASET_DIR = os.path.join(BASE_DIR, "data", "DS1_sample")
 PROCESSED_DIR = os.path.join(BASE_DIR, "data", "processed_images")
 FEATURES_DIR = os.path.join(BASE_DIR, "data", "features")
 
 def main():
+
     os.makedirs(FEATURES_DIR, exist_ok=True)
-    
-    # 1. Initialize Preprocessor
     preprocessor = FingerprintPreprocessor(DATASET_DIR, PROCESSED_DIR)
 
     try:
-        # Iterate through all subdirectories in the dataset path
-        # We assume folders are named '1', '2', etc.
+        
+        # assuming sub_folder names to be '1', '2', etc.
         subject_folders = [f for f in os.listdir(preprocessor.dataset_path) if os.path.isdir(os.path.join(preprocessor.dataset_path, f))]
 
         count = 0
         for subject in subject_folders:
             subject_path = os.path.join(preprocessor.dataset_path, subject)
             
-            # Find all BMP files
+            # find all bmps 
             bmp_files = glob.glob(os.path.join(subject_path, "*.bmp"))
             print(f"Found {len(bmp_files)} total files in dataset.")
             
             for file_path in bmp_files:
                 filename = os.path.basename(file_path)
                 
-                # Filter out the pre-processed files (HT, R414)
-                # We only want the pattern SIRE-SubjectID_FingerID_Capture.bmp
+                # filter out the pre-processed files (HT, R414)
+                # we only want the pattern SIRE-SubjectID_FingerID_Capture.bmp
                 if "_HT" in filename or "_R414" in filename:
                     continue
-                
-                # Optional: Skip standard pre-processed files if they exist in the source folder
+                 
                 if "_enhanced" in filename or "_skeleton" in filename or "_seg" in filename:
                     continue
-                # ----------------------------
-
-                # Skip if feature file already exists (Resume capability)
+                
                 feature_save_path = os.path.join(FEATURES_DIR, filename.replace(".bmp", ".npz"))
                 if os.path.exists(feature_save_path):
-                    # print(f"Skipping {filename} (already processed)")
                     continue
                 
-                # Step 1: Standardize
+                # step1: standardize
                 resized_path = preprocessor.standardize_image(file_path, filename)
                 
                 if resized_path:
-                    # Step 2: Segment
+                    # step2: segment
                     segmented_path = preprocessor.segment_image(resized_path, filename)
                     
                     if segmented_path:
-                        # Step 3: Enhance
-                        # We pass the segmented image path and the original filename
+                        # Step3: enhance
                         enhanced_img = preprocessor.enhance_image(segmented_path, filename)
                         
                         if enhanced_img is not None:
@@ -74,28 +68,24 @@ def main():
                             # cv2.imwrite(binarized_full_path, binary_img)
                             print(f"Binarized: {binarized_filename}")
 
-                            # After thinning
+                            # thinning
                             skeleton_img = preprocessor.thin_image(binary_img)
                             skeleton_filename = filename.replace(".bmp", "_skeleton.png")
                             skeleton_full_path = os.path.join(preprocessor.output_path, skeleton_filename)                                
                           
-                            # Clean skeleton
+                            # clean skeleton
                             skeleton_img = preprocessor.remove_spurs(skeleton_img, min_length=12)
 
-                            # Apply ROI
+                            # apply ROI
                             roi = preprocessor.get_roi_mask(enhanced_img)
                             skeleton_img = cv2.bitwise_and(skeleton_img, roi)
                             cv2.imwrite(skeleton_full_path, skeleton_img)
                             print(f"Skeleton: {skeleton_filename}")
 
 
-                            # --- CORRECTION ---
                             # Feed the ENHANCED GRAYSCALE image to the SDK, not the skeleton.
                             raw_minutiae = preprocessor.extract_minutiae(enhanced_full_path, enhanced_filename)
 
-                            # --- POST-PROCESSING ---
-                            # Apply your cleaning filters to the SDK's output
-                            # Note: You'll need to pass the image shape for border removal
                             h, w = enhanced_img.shape
                             
                             clean_data = preprocessor.remove_border_minutiae(raw_minutiae, (h, w))
@@ -106,13 +96,13 @@ def main():
                             print(f"Minutiae extracted: {len(raw_minutiae)} -> {len(clean_data)} (cleaned)")
 
 
-                             # Compute Orientation Field
+                            #  orientation Field
                             orientation_map = utils.compute_orientation_field(enhanced_img)
                             
-                            # Convert dicts to list of tuples for utils -> (x, y, angle)
+                            # convert dicts to list of tuples for utils -> (x, y, angle)
                             minutiae_list = [(m['x'], m['y'], m['angle']) for m in clean_data]
                             
-                            # Descriptors
+                            # descriptors
                             descriptors = []
                             for m in minutiae_list:
                                 desc = utils.get_local_descriptor(m, orientation_map)
@@ -120,10 +110,10 @@ def main():
                             descriptors = np.array(descriptors) 
 
                             
-                            # Ridge Count Matrix
+                            # ridge Count Matrix
                             rc_matrix = utils.precompute_ridge_counts(skeleton_img, minutiae_list)
 
-                            # 7. Save Features
+                            # save
                             np.savez_compressed(
                                 feature_save_path,
                                 minutiae=np.array(minutiae_list), 

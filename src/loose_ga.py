@@ -41,24 +41,24 @@ class LooseGeneticAlgorithm:
         
         population = []
         
-        # 1. Seeding (optional but recommended in assignment)
+        # 1. seeding 
         if initial_match is not None:
             population.append(initial_match)
         
-        # 2. Random Individuals
+        # 2. random Individuals
         while len(population) < self.pop_size:
             p = np.zeros(self.N1, dtype=np.int32)
             
-            # Randomly decide how many matches to make (n0)
+            # randomly decide how many matches to make (n0)
             n0 = random.randint(1, min(self.N1, self.N2))
             
-            # Select n0 random indices from T and Q
+            # select n0 random indices from T and Q
             indices_T = random.sample(range(self.N1), n0)
             indices_Q = random.sample(range(self.N2), n0)
             
-            # Assign matches
+            # assign matches
             for i, j in zip(indices_T, indices_Q):
-                p[i] = j + 1  # Store as 1-based index
+                p[i] = j + 1  # store as 1-based index
                 
             population.append(p)
             
@@ -68,36 +68,30 @@ class LooseGeneticAlgorithm:
         """
         Set-Based Crossover (Algorithm 1 in Paper / Assignment).
         """
-        # Step 1: Define Sets A and B (Set of active edges)
-        # Format: (i, match_value)
         A = set((i, p1[i]) for i in range(self.N1) if p1[i] != 0)
         B = set((i, p2[i]) for i in range(self.N1) if p2[i] != 0)
 
-        # Step 2: Intersection and Difference
+        # Intersection and Diff
         C = A.intersection(B)      # Matches in both
         D_A = A.difference(B)      # Matches unique to A
         D_B = B.difference(A)      # Matches unique to B
 
-        # Step 3: Random Selection
-        # Random subset of C
+        # Random Selection
         n1 = random.randint(0, len(C))
         C_n1 = set(random.sample(list(C), n1))
         
-        # Random subset of D_A
+        # random subset of D_A
         n2a = random.randint(0, len(D_A))
         D_A_prime = set(random.sample(list(D_A), n2a))
         
-        # Random subset of D_B
+        # random subset of D_B
         n2b = random.randint(0, len(D_B))
         D_B_prime = set(random.sample(list(D_B), n2b))
 
-        # Step 4: Construction
-        # Child 1 = C_subset U D_A_subset
+        # construction
         S1 = C_n1.union(D_A_prime)
-        # Child 2 = C_subset U D_B_subset
         S2 = C_n1.union(D_B_prime)
 
-        # Convert back to vector p
         c1 = np.zeros(self.N1, dtype=np.int32)
         for i, val in S1:
             c1[i] = val
@@ -119,17 +113,15 @@ class LooseGeneticAlgorithm:
         mutation_type = random.choice(['remove', 'add', 'swap'])
         
         if mutation_type == 'remove':
-            # Remove a non-zero value
             non_zeros = np.where(pm != 0)[0]
             if len(non_zeros) > 0:
                 idx = random.choice(non_zeros)
                 pm[idx] = 0
                 
         elif mutation_type == 'add':
-            # Add an unassigned value to a zero position
             zeros = np.where(pm == 0)[0]
             if len(zeros) > 0:
-                # Find unused values in Q (1 to N2)
+                # find unused values in
                 used_vals = set(pm)
                 all_vals = set(range(1, self.N2 + 1))
                 unused_vals = list(all_vals - used_vals)
@@ -140,8 +132,7 @@ class LooseGeneticAlgorithm:
                     pm[idx] = val
                     
         elif mutation_type == 'swap':
-            # Swap two positions (j1, j2)
-            # The assignment implies swapping the VALUES at two random positions
+            # swap two positions (j1, j2)
             j1, j2 = random.sample(range(self.N1), 2)
             pm[j1], pm[j2] = pm[j2], pm[j1]
             
@@ -152,21 +143,18 @@ class LooseGeneticAlgorithm:
         population = self.initialize_population(initial_solution)
         
         for g in range(max_generations):
-            # 1. Calculate Fitness
+            # calculate Fitness
             fitness_scores = [self.calculate_fitness(p) for p in population]
             
-            # Sort by fitness (descending)
+            # sort by fitness (descending)
             sorted_indices = np.argsort(fitness_scores)[::-1]
             population = population[sorted_indices]
-            
-            # Elitism: Keep top N individuals? (Standard practice, though assignment says select top n)
-            # We'll select top 'pop_size' at the end of the loop
             
             next_gen = []
             
             # 2. Crossover
             # Select parents (simple top-half selection or tournament)
-            # Here we take random pairs from the current population
+            # take random pairs from the current population
             num_crossovers = int(self.pop_size * self.cr)
             for _ in range(num_crossovers):
                 p1 = population[random.randint(0, len(population)-1)]
@@ -181,17 +169,16 @@ class LooseGeneticAlgorithm:
                 pm = self.mutation(p)
                 next_gen.append(pm)
                 
-            # 4. Selection (Survivor Selection)
-            # Combine parents + children + mutants
+            # Selection (Survivor Selection)
+            # combine parents + children + mutants
             combined_pop = np.vstack((population, np.array(next_gen)))
             
-            # Recalculate fitness for everyone
+            # recalculate fitness for everyone
             final_scores = [self.calculate_fitness(p) for p in combined_pop]
             best_indices = np.argsort(final_scores)[::-1][:self.pop_size]
             
             population = combined_pop[best_indices]
             
-            # Optional: Print best score
             # print(f"Gen {g}: Best Fitness = {final_scores[best_indices[0]]}")
             
         return population[0], self.calculate_fitness(population[0])

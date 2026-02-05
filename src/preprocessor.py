@@ -17,16 +17,14 @@ class FingerprintPreprocessor:
     def __init__(self, dataset_path, output_path):
         self.dataset_path = dataset_path
         self.output_path = output_path
-        # Create output directory if it doesn't exist
         os.makedirs(self.output_path, exist_ok=True)
-        # Initialize the SDK
         self.engine = self.init_sdk()
         self.all_features = {}
 
     def standardize_image(self, image_path, filename, target_ppi=500):
         try:
             with Image.open(image_path) as img:
-                # Get current PPI, default to 1000 if not found
+                # get current PPI, default to 1000 if not found
                 current_ppi = img.info.get('dpi', (1000, 1000))[0]
 
                 if current_ppi < target_ppi:
@@ -35,17 +33,13 @@ class FingerprintPreprocessor:
                 else:
                     scale_factor = target_ppi / current_ppi
                 
-                # Calculate new dims
+                # calculate new dims
                 new_w = int(img.width * scale_factor)
                 new_h = int(img.height * scale_factor)
                 
-                # Resize
+                # resize
                 resized_image = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
-                
-                # Save to the processed folder
                 save_path = os.path.join(self.output_path, filename)
-                
-                # Setting dpi in save is good metadata hygiene
                 resized_image.save(save_path, dpi=(target_ppi, target_ppi))
                 
                 print(f"Processed: {filename} | {img.size} -> {resized_image.size}")
@@ -57,35 +51,30 @@ class FingerprintPreprocessor:
 
     def process_dataset(self):
         try:
-            # Iterate through all subdirectories in the dataset path
-            # We assume folders are named '1', '2', etc.
             subject_folders = [f for f in os.listdir(self.dataset_path) if os.path.isdir(os.path.join(self.dataset_path, f))]
             
             count = 0
             for subject in subject_folders:
                 subject_path = os.path.join(self.dataset_path, subject)
                 
-                # Find all BMP files
+                # find all bmps 
                 bmp_files = glob.glob(os.path.join(subject_path, "*.bmp"))
                 
                 for file_path in bmp_files:
                     filename = os.path.basename(file_path)
                     
-                    # Filter out the pre-processed files (HT, R414)
-                    # We only want the pattern SIRE-SubjectID_FingerID_Capture.bmp
                     if "_HT" in filename or "_R414" in filename:
                         continue
                     
-                    # Step 1: Standardize
+                    # step 1: std
                     resized_path = self.standardize_image(file_path, filename)
                     
                     if resized_path:
-                        # Step 2: Segment
+                        # step 2: seg
                         segmented_path = self.segment_image(resized_path, filename)
                         
                         if segmented_path:
-                            # Step 3: Enhance
-                            # We pass the segmented image path and the original filename
+                            # step 3: enh
                             enhanced_img = self.enhance_image(segmented_path, filename)
                             
                             if enhanced_img is not None:
@@ -100,7 +89,7 @@ class FingerprintPreprocessor:
                                 cv2.imwrite(binarized_full_path, binary_img)
                                 print(f"Binarized: {binarized_filename}")
 
-                                # After thinning
+                                # thinning
                                 skeleton_img = self.thin_image(binary_img)
                                 skeleton_filename = filename.replace(".bmp", "_skeleton.png")
                                 skeleton_full_path = os.path.join(self.output_path, skeleton_filename)                                
@@ -108,22 +97,16 @@ class FingerprintPreprocessor:
                                 print(f"Skeleton: {skeleton_filename}")
 
                                 
-                                # Clean skeleton
+                                # clean skeleton
                                 skeleton_img = self.remove_spurs(skeleton_img, min_length=12)
 
-                                # Apply ROI
                                 roi = self.get_roi_mask(enhanced_img)
                                 skeleton_img = cv2.bitwise_and(skeleton_img, roi)
                                 cv2.imwrite(skeleton_full_path, skeleton_img)
 
 
-                                # --- CORRECTION ---
-                                # Feed the ENHANCED GRAYSCALE image to the SDK, not the skeleton.
                                 raw_minutiae = self.extract_minutiae(enhanced_full_path, enhanced_filename)
 
-                                # --- POST-PROCESSING ---
-                                # Apply your cleaning filters to the SDK's output
-                                # Note: You'll need to pass the image shape for border removal
                                 h, w = enhanced_img.shape
                                 
                                 clean_data = self.remove_border_minutiae(raw_minutiae, (h, w))
@@ -147,7 +130,7 @@ class FingerprintPreprocessor:
     
     def init_sdk(self):
         """Initializes the SDK and returns the Engine object."""
-        # 1. Initialize License
+        # 1. init License
         is_trial_mode = True
         NLicenseManager.set_trial_mode(is_trial_mode)
         
@@ -166,28 +149,20 @@ class FingerprintPreprocessor:
         return engine
 
     def segment_image(self, image_path, filename):
-            # 1. Load the image
+            
             nimage = NImage(image_path)
             
-            # 2. Prepare the Finger object
             finger = NFinger()
             finger.image = nimage
             finger.position = NFPosition.nfpUnknown
             
-            # 3. Prepare the Subject object
             subject = NSubject()
             subject.fingers.add(finger)
 
-            # 4. Perform the Segmentation
-            # This modifies the 'subject' object in place!
             status = self.engine.perform_operation(subject, NBiometricOperations.segment)
             
-            # 5. Check Result and Save
             if status == NBiometricStatus.ok:
-                # CRITICAL FIX: The segmented result is usually at index 1 (or higher)
-                # Index 0 is the original input image.
                 if subject.fingers.count > 1:
-                    # We grab the last one added, which is typically the segmented result
                     segmented_image = subject.fingers[subject.fingers.count - 1].image
                     
                     new_filename = os.path.splitext(filename)[0] + "_seg.png"
@@ -229,7 +204,7 @@ class FingerprintPreprocessor:
         # Contrast stretch
         enhanced = cv2.normalize(enhanced, None, 0, 255, cv2.NORM_MINMAX)
 
-        # CLAHE (recommended for contactless)
+        # CLAHE
         clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
         enhanced = clahe.apply(enhanced)
 
@@ -321,10 +296,7 @@ class FingerprintPreprocessor:
 
     def remove_border_minutiae(self, minutiae, shape, margin=15):
         h, w = shape
-        return [
-            m for m in minutiae
-            if margin < m['x'] < w-margin and margin < m['y'] < h-margin
-        ]
+        return [m for m in minutiae if margin < m['x'] < w-margin and margin < m['y'] < h-margin]
 
     def remove_isolated(self, minutiae, min_neighbors=1, radius=20):
         filtered = []
@@ -339,19 +311,13 @@ class FingerprintPreprocessor:
 
 
     def extract_minutiae(self, image_path, filename):
-        # 1. Load the enhanced image
         nimage = NImage(image_path)
 
-        # --- ROBUST FIX: Force Resolution ---
-        # Set both horizontal and vertical resolution explicitly
         nimage.horz_resolution = 500
         nimage.vert_resolution = 500
         nimage.resolution = 500 # Set this too just in case
         
-        # DEBUG: Verify the SDK accepted the value
-        # This will tell us if the value is sticking or being ignored
-        print(f"DEBUG: Resolution for {filename} set to: {nimage.horz_resolution}")
-        # ------------------------------------
+        # print(f"DEBUG: Resolution for {filename} set to: {nimage.horz_resolution}")
         
         finger = NFinger()
         finger.image = nimage
@@ -361,38 +327,20 @@ class FingerprintPreprocessor:
         subject.fingers.add(finger)
 
         # 2. Extract Features (Create Template)
-        # This operation detects minutiae and generates the template
         status = self.engine.perform_operation(subject, NBiometricOperations.create_template)
         
         if status == NBiometricStatus.ok:
-            # The template is stored in the subject
-            # Hierarchy: Subject -> Template -> FingerRecords -> Minutiae
-            # FIX: Use the property '.template' instead of the method '.get_template()'
             template = subject.template
-            
             if template:
-                # Based on finger_get_minutia.py, the path to minutiae is nested:
-                # Template -> Fingers (Collection) -> Records (NFRecord) -> Minutiae
-                # Note: The SDK wrapper structure can be tricky, so we use a try-block or inspect it.
-                
-                # Let's try the structure from your tutorial file:
-                # minutia = finger_templates[0].fingers.records[0].minutiae
-                
                 try:
-                    # Access the first finger record in the template
+                    # access the first finger record in the template
                     minutiae_list = template.fingers.records[0].minutiae
                 except AttributeError:
-                    # Fallback: sometimes it is accessed differently depending on the wrapper version
                     print(f"DEBUG: Template structure: {dir(template)}")
-                    # Try direct access if the above fails (sometimes template.fingers[0].minutiae)
+                    # try direct access if the above fails (sometimes template.fingers[0].minutiae)
                     minutiae_list = template.fingers[0].minutiae
                 
-                # Prepare data for Graph Construction (Step 5)
                 extracted_data = []
-                
-                # Prepare visualization image
-                # We need to convert NImage to a numpy format OpenCV can handle
-                # (The tutorial uses a helper, but we can reload via cv2 for simplicity)
                 vis_image = cv2.imread(image_path)
                 
                 # Conversion factor: SDK byte (0-255) -> Degrees -> Radians
@@ -402,12 +350,11 @@ class FingerprintPreprocessor:
                 print(f"Minutiae found for {filename}: {len(minutiae_list)}")
                 
                 for m in minutiae_list:
-                    # Geometric attributes
                     x = m.x
                     y = m.y
                     angle_rad = m.angle * byte_to_rad
                     
-                    # Type: 0=Unknown, 1=Ending, 2=Bifurcation (SDK dependent)
+                    # type: 0=Unknown, 1=Ending, 2=Bifurcation (SDK dependent)
                     m_type = m.type 
                     
                     # Store for the Graph
@@ -418,17 +365,16 @@ class FingerprintPreprocessor:
                         'type': m_type
                     })
 
-                    # --- Visualization (Optional but Recommended) ---
-                    # Draw location
+                    # draw location
                     cv2.circle(vis_image, (x, y), 3, (0, 0, 255), -1)
                     
-                    # Draw direction
+                    # draw direction
                     line_len = 15
                     x2 = int(x + line_len * np.cos(angle_rad))
                     y2 = int(y + line_len * np.sin(angle_rad))
                     cv2.line(vis_image, (x, y), (x2, y2), (255, 0, 0), 1)
                 
-                # Save Visualization
+                # save viz
                 vis_filename = filename.replace("_enhanced.png", "_minutiae.png")
                 cv2.imwrite(os.path.join(self.output_path, vis_filename), vis_image)
                 
